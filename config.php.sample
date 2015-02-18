@@ -1,0 +1,57 @@
+<?php
+    define('IMAGE_STATUS_TABLE', 'script_images');
+    define('ERROR_CONTACT_EMAIL','marc@localhost.de');
+    define('THIS_DIR', dirname(__FILE__));
+    define('LOG_FILE', THIS_DIR.'/log');
+    $mysqli_instance_args = ['DBHOST', 'DBUSER', 'DBPASSWORD', 'DATABASE'];
+
+    $database_columns_to_process = [
+      [
+        'table' => 'table',
+        'field' => 'field',
+        'type' => 'myisam',
+        'key_fields' => ['id'],
+      ],
+      [
+        'table' => 'table2',
+        'field' => 'field2',
+        'type' => 'myisam',
+        'key_fields' => ['id'],
+      ]
+    ];
+
+    function download_url($url){
+      if (preg_match('/^https:\/\/THIS_DOMAIN/', $url))
+        return false; // already downloaded
+
+      if (preg_match('/http(s?):\/\//', $url))
+        return true; // ok, absolute url
+
+      return false; // relative url, is likely to fail anyway
+    }
+
+    function new_url($id, $ext)   { return 'https://THIS_DOMAIN/'.$id.'.'.$ext; }
+    function store_path($id, $ext){ return THIS_DIR.'/'           .$id.'.'.$ext; }
+
+
+    ### FOR DEVS ONLY
+    if (false){
+      $errorfile = dirname(__FILE__).'/error';
+      if (file_exists($errorfile)) unlink($errorfile);
+
+      function custom_failure_handler($o){
+        $message = $o['message'];
+        $trace = $o['trace'];
+        global $errorfile;
+
+        $s = '';
+        foreach( $trace as $k){
+          $s.="\n".(isset($k['file']) ? $k['file'] : 'nofile')
+            .':'.(isset($k['line']) ? $k['line'] : 'no line');
+        }
+
+        file_put_contents($errorfile, str_replace('<br>',"\n",$message) . $s);
+        // assign 777 because I sometimes use PHP in console..
+        chmod($errorfile, 0777);
+      }
+    }
