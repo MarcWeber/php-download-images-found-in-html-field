@@ -35,7 +35,9 @@ $demo_texts = [
 
 "
   <x
-"
+",
+# image only
+"http://s3.buysellads.com/1258100/223291-1400632720.gif"
 ];
 
 $mysqli->query("DROP TABLE IF EXISTS ".IMAGE_STATUS_TABLE_Q);

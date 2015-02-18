@@ -55,6 +55,76 @@ try {
   $stmt_update_message = $mysqli->prepare('UPDATE '.IMAGE_STATUS_TABLE_Q.' SET last_try = NOW(), tries = tries + 1, last_error = ? WHERE md5_of_url = ?');
   $stmt_update_ok = $mysqli->prepare('UPDATE '.IMAGE_STATUS_TABLE_Q.' SET download_ok = "Y" WHERE md5_of_url = ?');
 
+  $rewrite_url = function($src) use(&$md5_to_id, &$stmt_insert, &$stmt_update_ok, &$stmt_update_message){
+    # returns "new link" or false
+    if (download_url($src)){
+      $md5 = md5($src);
+      $path_parts = pathinfo(preg_replace('/\?.*/', '', $src));
+      $ext = $path_parts['extension'];
+
+      if (null === $x = A::get_or($md5_to_id, $md5, null)){
+        // ensure its in cache array and db
+        if (is_null($x)) {
+          debug("inserting $src $md5");
+          $src_short = mb_substr($src,0,230);
+          $stmt_insert->bind_param('sss', $md5, $ext, $src_short); // UTF-8 stuff could be longer
+          $stmt_insert->execute();
+          $x = ['ext' => $ext, 'id' => $stmt_insert->insert_id, 'download_ok' => 'N', 'last_try' => null, 'tries' => 0];
+          $md5_to_id[$md5] =& $x;
+        }
+      }
+
+      $skip_reason = null;
+      if ($x['download_ok'] == 'Y')
+        $skip_reason = "on disk";
+      elseif ($x['last_try'] == 'this_run')
+        $skip_reason = "already tried";
+      elseif (!is_null($x['last_try']) && strtotime($x['last_try']) + 60 * 60 * 24 * /* retry every 2 days */ 2 < time())
+        $skip_reason = "last_try too recent";
+      if (!is_null($skip_reason)){
+        debug("skipping download of $src for reason: $skip_reason");
+      } else {
+        $store_path = store_path($x['id'], $x['ext']);
+        debug("store-path is $store_path, fetching $src");
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $src);
+        curl_setopt($ch, CURLOPT_VERBOSE, 0);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER,1);
+        $response = curl_exec($ch);
+        $curl_err = curl_errno($ch);
+
+        unset($curl_msg);
+        if (200 != $code = curl_getinfo($ch, CURLINFO_HTTP_CODE)){
+          $curl_msg = "status: $code";
+        }elseif ($curl_err){
+          $curl_msg = curl_error($ch);
+        }
+        curl_close($ch);
+        if (isset($curl_msg)){
+          debug("fetch error: $curl_msg for $src");
+          $err_short = mb_substr($curl_msg, 0, 230);
+          $stmt_update_message->bind_param('ss', $err_short, $md5);
+          $stmt_update_message->execute();
+          $x['last_try'] = 'this_run';
+        } else {
+          debug("writing file $store_path");
+          file_put_contents($store_path, $response);
+          $stmt_update_ok->bind_param('s', $md5);
+          $stmt_update_ok->execute();
+          $x['download_ok'] = 'Y';
+        }
+      } // END attempt downloading ..
+
+      if ($x['download_ok'] == 'Y') {
+        $dirty = true;
+        return new_url($x['id'], $x['ext']);
+      }
+      return false;
+    }
+  };
+
   // FOR EACH TABLE & FIELD CONFIG
   foreach ($database_columns_to_process as $cfg) {
     $stmt_update_html = $mysqli->prepare(
@@ -74,92 +144,41 @@ try {
       debug("keys: ".implode($keys));
 
       $html = $v[$cfg['field']];
-      // DomDocument fails parsing almost everything, don't even attempt to use it
-      $doc = new DOMDocument;
-      $doc->strictErrorChecking = false;
-      $doc->preserveWhiteSpace = true;
-      try {
-        $doc->loadXML($html);
-      } catch (Exception $e) {
-        log_parsing_problem(array_replace($cfg, ['message' => $e->getMessage(), 'keys' => $keys, 'html' => $html]));
-      }
-      $xpath = new DOMXpath($doc);
-      $dirty = false;
+      $html_new = false;
 
-      // FIND IMAGES
-      foreach ($xpath->query("//img") as $el) {
-        $src = $el->getAttribute("src");
-        if (download_url($src)){
-          $md5 = md5($src);
-          $path_parts = pathinfo(preg_replace('/\?.*/', '', $src));
-          $ext = $path_parts['extension'];
+      if (preg_match('/^http/', $html)){
+        # don't use HTML parser, its just a link
 
-          if (null === $x = A::get_or($md5_to_id, $md5, null)){
-            // ensure its in cache array and db
-            if (is_null($x)) {
-              debug("inserting $src $md5");
-              $src_short = mb_substr($src,0,230);
-              $stmt_insert->bind_param('sss', $md5, $ext, $src_short); // UTF-8 stuff could be longer
-              $stmt_insert->execute();
-              $x = ['ext' => $ext, 'id' => $stmt_insert->insert_id, 'download_ok' => 'N', 'last_try' => null, 'tries' => 0];
-              $md5_to_id[$md5] =& $x;
-            }
-          }
-
-          $skip_reason = null;
-          if ($x['download_ok'] == 'Y')
-            $skip_reason = "on disk";
-          elseif ($x['last_try'] == 'this_run')
-            $skip_reason = "already tried";
-          elseif (!is_null($x['last_try']) && strtotime($x['last_try']) + 60 * 60 * 24 * /* retry every 2 days */ 2 < time())
-            $skip_reason = "last_try too recent";
-          if (!is_null($skip_reason)){
-            debug("skipping download of $src for reason: $skip_reason");
-          } else {
-            $store_path = store_path($x['id'], $x['ext']);
-            debug("store-path is $store_path, fetching $src");
-            $ch = curl_init();
-            curl_setopt($ch, CURLOPT_URL, $src);
-            curl_setopt($ch, CURLOPT_VERBOSE, 0);
-            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER,1);
-            $response = curl_exec($ch);
-
-            $curl_err = curl_errno($ch);
-
-            unset($curl_msg);
-            if (200 != $code = curl_getinfo($ch, CURLINFO_HTTP_CODE)){
-              $curl_msg = "status: $code";
-            }elseif ($curl_err){
-              $curl_msg = curl_error($ch);
-            }
-            if (isset($curl_msg)){
-              debug("fetch error: $curl_msg for $src");
-              $err_short = mb_substr($curl_msg, 0, 230);
-              $stmt_update_message->bind_param('ss', $err_short, $md5);
-              $stmt_update_message->execute();
-              $x['last_try'] = 'this_run';
-            } else {
-              debug("writing file $store_path");
-              file_put_contents($store_path, $response);
-              $stmt_update_ok->bind_param('s', $md5);
-              $stmt_update_ok->execute();
-              $x['download_ok'] = 'Y';
-            }
-            curl_close($ch);
-          } // attempt downloading ..
-
-          if ($x['download_ok'] == 'Y') {
-            $dirty = true;
-            $new_url = new_url($x['id'], $x['ext']);
-            $el->setAttribute("src", $new_url);
-          }
-          unset($x);
+        if (false !== $new_link = $rewrite_url($html)){
+          $html_new = $new_link;
         }
-      }
-      if ($dirty){
+
+      } else {
+        // assume field contains HTML
+
+        // DomDocument fails parsing almost everything, don't even attempt to use it
+        $doc = new DOMDocument;
+        $doc->strictErrorChecking = false;
+        $doc->preserveWhiteSpace = true;
+        try {
+          $doc->loadXML($html);
+        } catch (Exception $e) {
+          log_parsing_problem(array_replace($cfg, ['message' => $e->getMessage(), 'keys' => $keys, 'html' => $html]));
+        }
+        $xpath = new DOMXpath($doc);
+        $dirty = false;
+
+        // FIND IMAGES
+        foreach ($xpath->query("//img") as $el) {
+          $src = $el->getAttribute("src");
+          if (false !== $new_link = $rewrite_url($src)){
+            $dirty = true;
+            $el->setAttribute("src", $new_link);
+          }
+        }
         $html_new = $doc->saveXML();
+      }
+      if ($html_new !== false){
         $args = array_merge([$html_new, $html], array_values($keys));
                                         # ^ only update if the HTML wasn't changed meanwhile !
         array_unshift($args, implode(array_map(function($x){return 's';}, $args)));
