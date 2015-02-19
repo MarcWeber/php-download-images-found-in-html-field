@@ -121,8 +121,8 @@ try {
         $dirty = true;
         return new_url($x['id'], $x['ext']);
       }
-      return false;
     }
+    return false;
   };
 
   // FOR EACH TABLE & FIELD CONFIG
